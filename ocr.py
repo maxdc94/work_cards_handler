@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import pandas as pd
 from torch import nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import models
 import albumentations as A
 from tqdm import tqdm
@@ -15,28 +15,29 @@ import os
 # =========================
 IMG_H = 40
 IMG_W = 160
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 EPOCHS = 500
-LR = 1e-4
+LR = 5e-5
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print("Using device:", DEVICE)
 
 VOCAB = "0123456789:"
 BLANK = 0
 CHAR2IDX = {c: i + 1 for i, c in enumerate(VOCAB)}
 IDX2CHAR = {i + 1: c for i, c in enumerate(VOCAB)}
 
+EARLY_STOPPING_PATIENCE = 20
+
 # =========================
 # PREPROCESSING
 # =========================
 def preprocess(img):
-    if len(img.shape) == 2:  # già grayscale
+    if len(img.shape) == 2:
         gray = img
-    elif len(img.shape) == 3:  # BGR
+    elif len(img.shape) == 3:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
         raise ValueError(f"Formato immagine non valido: {img.shape}")
-
-    # ridimensiona all’input della rete
     gray = cv2.resize(gray, (IMG_W, IMG_H))
     gray = gray.astype("float32") / 255.0
     return gray
@@ -45,14 +46,8 @@ def preprocess(img):
 # AUGMENTATION
 # =========================
 augment = A.Compose([
-    A.RandomBrightnessContrast(0.2, 0.2),
-    A.GaussNoise((0.05, 0.15)),
-    A.MotionBlur(3),
-    A.Affine(
-        rotate=(-2, 2),
-        translate_percent=(0.01, 0.03),
-        scale=(0.95, 1.05)
-    )
+    A.RandomBrightnessContrast(0.1, 0.1),
+    A.ShiftScaleRotate(shift_limit=0.02, scale_limit=0.02, rotate_limit=2, border_mode=cv2.BORDER_CONSTANT, value=255)
 ])
 
 # =========================
@@ -72,7 +67,7 @@ class TimeDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        img = cv2.imread(f"{self.img_dir}/{row.filename}")
+        img = cv2.imread(os.path.join(self.img_dir, row.filename))
         img = preprocess(img)
 
         if self.training:
@@ -89,14 +84,14 @@ class TimeDataset(Dataset):
 class CRNN(nn.Module):
     def __init__(self):
         super().__init__()
-
         backbone = models.mobilenet_v3_small(pretrained=True)
         self.cnn = backbone.features
         self.cnn[0][0].stride = (1, 1)
 
-        self.fc = nn.Linear(576, 128)
-        self.rnn = nn.LSTM(128, 128, bidirectional=True, batch_first=True)
-        self.classifier = nn.Linear(256, len(VOCAB) + 1)
+        # FC + LSTM più piccolo
+        self.fc = nn.Linear(576, 64)
+        self.rnn = nn.LSTM(64, 64, bidirectional=True, batch_first=True)
+        self.classifier = nn.Linear(128, len(VOCAB) + 1)
 
     def forward(self, x):
         x = self.cnn(x)
@@ -108,34 +103,44 @@ class CRNN(nn.Module):
         return x
 
 # =========================
-# DECODING
+# DECODING ROBUSTO
 # =========================
 def decode(pred):
     pred = pred.softmax(2).argmax(2)
     results = []
-
     for p in pred:
         text = ""
         prev = None
         for c in p:
             c = c.item()
             if c != prev and c != BLANK:
-                text += IDX2CHAR[c]
+                text += IDX2CHAR.get(c, "")
             prev = c
+        # post-processing per renderlo HH:MM
+        text = fix_time(text)
         results.append(text)
     return results
 
-def valid_time(t):
-    if len(t) != 5 or t[2] != ":":
-        return False
+def fix_time(t):
+    """
+    Converte stringa generata dalla rete in HH:MM valida
+    es: "12:1" -> "12:01", "::::" -> "00:00"
+    """
+    # Se non c'è due parti separate dai ':', ritorna 00:00
+    if len(t) != 5 or t[2] != ":" or t == ":::::":
+        return "00:00"
     h, m = t.split(":")
-    return h.isdigit() and m.isdigit() and 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+    if not (h.isdigit() and m.isdigit()):
+        return "00:00"
+    h = max(0, min(int(h), 23))
+    m = max(0, min(int(m), 59))
+    return f"{h:02d}:{m:02d}"
 
+# =========================
+# COLLATE
+# =========================
 def ctc_collate(batch):
-    imgs = []
-    labels = []
-    label_lengths = []
-
+    imgs, labels, label_lengths = [], [], []
     for img, label in batch:
         imgs.append(img)
         labels.append(label)
@@ -150,59 +155,71 @@ def ctc_collate(batch):
 # =========================
 # TRAIN
 # =========================
-def train():
-    ds = TimeDataset("dataset/labels.csv", "dataset/images", True)
-    dl = DataLoader(
-        ds,
-        BATCH_SIZE,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=ctc_collate
-    )
+def train(csv_path="dataset/labels.csv", img_dir="dataset/images"):
+    ds = TimeDataset(csv_path, img_dir, True)
+    val_size = max(1, int(len(ds) * 0.2))
+    train_size = len(ds) - val_size
+    train_ds, val_ds = random_split(ds, [train_size, val_size])
+
+    train_dl = DataLoader(train_ds, BATCH_SIZE, shuffle=True, drop_last=True, collate_fn=ctc_collate)
+    val_dl = DataLoader(val_ds, BATCH_SIZE, shuffle=False, drop_last=False, collate_fn=ctc_collate)
 
     model = CRNN().to(DEVICE)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     ctc = nn.CTCLoss(blank=BLANK, zero_infinity=True)
 
+    best_val_loss = float("inf")
+    patience_counter = 0
+
     for epoch in range(EPOCHS):
         model.train()
-        loss_sum = 0
-
-        for imgs, labels, label_lengths in tqdm(dl):
-            imgs = imgs.to(DEVICE)
-            labels = labels.to(DEVICE)
-            label_lengths = label_lengths.to(DEVICE)
-
+        train_loss_sum = 0
+        for imgs, labels, label_lengths in tqdm(train_dl):
+            imgs, labels, label_lengths = imgs.to(DEVICE), labels.to(DEVICE), label_lengths.to(DEVICE)
             preds = model(imgs)
-            preds = preds.permute(1, 0, 2)  # [T, B, C]
-
-            pred_lengths = torch.full(
-                (imgs.size(0),),
-                preds.size(0),
-                dtype=torch.long,
-                device=DEVICE
-            )
-
-            preds = preds.log_softmax(2)
-
-            loss = ctc(
-                preds,
-                labels,
-                pred_lengths,
-                label_lengths
-            )
-
+            preds = preds.permute(1,0,2)  # [T,B,C]
+            pred_lengths = torch.full((imgs.size(0),), preds.size(0), dtype=torch.long, device=DEVICE)
+            loss = ctc(preds.log_softmax(2), labels, pred_lengths, label_lengths)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            train_loss_sum += loss.item()
 
-            loss_sum += loss.item()
+        # VALIDATION
+        model.eval()
+        val_loss_sum = 0
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for imgs, labels, label_lengths in val_dl:
+                imgs, labels, label_lengths = imgs.to(DEVICE), labels.to(DEVICE), label_lengths.to(DEVICE)
+                preds = model(imgs)
+                preds_perm = preds.permute(1,0,2)
+                pred_lengths = torch.full((imgs.size(0),), preds_perm.size(0), dtype=torch.long, device=DEVICE)
+                loss = ctc(preds_perm.log_softmax(2), labels, pred_lengths, label_lengths)
+                val_loss_sum += loss.item()
+                decoded = decode(preds)
+                for dec, lbl in zip(decoded, labels.split(label_lengths.tolist())):
+                    total += 1
+                    label_text = "".join([IDX2CHAR[i.item()] for i in lbl])
+                    if fix_time(dec) == fix_time(label_text):
+                        correct += 1
 
-        print(f"EPOCH {epoch+1}: loss={loss_sum:.4f}")
+        val_acc = correct / total if total > 0 else 0.0
+        print(f"Epoch {epoch+1}: train_loss={train_loss_sum:.4f}, val_loss={val_loss_sum:.4f}, val_acc={val_acc:.4f}")
 
-    today = datetime.today().strftime("%Y%m%d")
-    torch.save(model.state_dict(), f"ocr_timbratrice_{today}.pt")
+        # Early stopping
+        if val_loss_sum < best_val_loss:
+            best_val_loss = val_loss_sum
+            patience_counter = 0
+            today = datetime.today().strftime("%Y%m%d")
+            torch.save(model.state_dict(), f"ocr_timbratrice_{today}.pt")
+        else:
+            patience_counter += 1
+            if patience_counter >= EARLY_STOPPING_PATIENCE:
+                print("Early stopping!")
+                break
 
 # =========================
 # INFERENCE
@@ -212,50 +229,23 @@ def infer(image_path, model_path):
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     model.eval()
 
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)  # prendi 1 canale
-    img = preprocess(img)  # restituisce [H, W]
-    
-    # replico 3 canali
-    img = torch.tensor(img).unsqueeze(0).repeat(3, 1, 1)
-    img = img.unsqueeze(0).to(DEVICE)  # [1, 3, H, W]
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    img = preprocess(img)
+    img = torch.tensor(img).unsqueeze(0).repeat(3,1,1).unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
         preds = model(img)
-        preds = preds.log_softmax(2)
-
-    text = decode(preds)[0]
-    return text
-
-def infer_folder(folder_path, model_path):
-    # carica modello
-    model = CRNN().to(DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-    model.eval()
-
-    results = {}
-    for fname in sorted(os.listdir(folder_path)):
-        if fname.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")) and "_c1" not in fname:
-            path = os.path.join(folder_path, fname)
-            try:
-                time_text = infer(path, model)
-                results[fname] = time_text
-            except Exception as e:
-                print(f"Errore con {fname}: {e}")
-    return results
+    return decode(preds)[0]
 
 # =========================
 if __name__ == "__main__":
-    
-    print("\n\n")
-    _in = input("Do you want to train or to perform an inference? (T/I)")
-
+    _in = input("Do you want to train or perform inference? (T/I): ").upper()
     if _in == "T":
         train()
     elif _in == "I":
-        # test single img
-        text = infer("C:\\Users\\massimo\\Desktop\\leggi_cartellino\\tmp\\cells_imags\\pagina_002\\r16_c4.png", "ocr_timbratrice_V0.pt")
-        print("ora stimata:" + text)
+        path = input("Path image: ")
+        model_path = input("Path model .pt: ")
+        text = infer(path, model_path)
+        print("Ora stimata:", text)
     else:
-        print("Error")
-
-    #infer_folder("C:\\Users\\massimo\\Desktop\\leggi_cartellino\\dataset\\images", "ocr_timbratrice_V0.pt")
+        print("Input non valido")
