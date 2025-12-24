@@ -1,0 +1,5 @@
+MODEL = "ocr_timbratrice_20251224.pt"
+INPUT_PDF = "input/cartellini_202512.pdf"
+WORK_CARDS_FOLDER = "tmp/work_cards"
+CELL_IMGS_FOLDER = "tmp/cells_images"
+TRAINING_SET = "dataset/images"
