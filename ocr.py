@@ -138,13 +138,45 @@ def fix_time(t:str)->str:
     m = max(0,min(int(m),59))
     return f"{h:02d}:{m:02d}"
 
+def levenshtein(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if len(a) == 0:
+        return len(b)
+    if len(b) == 0:
+        return len(a)
+
+    dp = np.zeros((len(a) + 1, len(b) + 1), dtype=int)
+
+    for i in range(len(a) + 1):
+        dp[i][0] = i
+    for j in range(len(b) + 1):
+        dp[0][j] = j
+
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,      # deletion
+                dp[i][j - 1] + 1,      # insertion
+                dp[i - 1][j - 1] + cost
+            )
+    return dp[-1][-1]
+
+
+def cer(pred: str, gt: str) -> float:
+    gt = gt.strip()
+    if len(gt) == 0:
+        return 1.0
+    return levenshtein(pred, gt) / len(gt)
+
 # =========================
 # TRAIN FUNCTION
 # =========================
 def train(model, train_loader, val_loader):
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt, mode="min", factor=0.5, patience=5
+        opt, mode="min", factor=0.5, patience=10
     )
     ctc = nn.CTCLoss(blank=BLANK, zero_infinity=True)
 
@@ -152,18 +184,25 @@ def train(model, train_loader, val_loader):
     patience_counter = 0
 
     for epoch in range(EPOCHS):
-        # ========= TRAIN =========
+        # ======================
+        # TRAIN
+        # ======================
         model.train()
         train_loss_sum = 0.0
 
-        for imgs, labels, lengths in tqdm(train_loader):
-            imgs, labels, lengths = imgs.to(DEVICE), labels.to(DEVICE), lengths.to(DEVICE)
+        for imgs, labels, lengths in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+            imgs = imgs.to(DEVICE)
+            labels = labels.to(DEVICE)
+            lengths = lengths.to(DEVICE)
 
             preds = model(imgs)
-            preds = preds.permute(1, 0, 2)  # [T,B,C]
+            preds = preds.permute(1, 0, 2)
 
             pred_lengths = torch.full(
-                (imgs.size(0),), preds.size(0), dtype=torch.long, device=DEVICE
+                (imgs.size(0),),
+                preds.size(0),
+                dtype=torch.long,
+                device=DEVICE
             )
 
             loss = ctc(preds.log_softmax(2), labels, pred_lengths, lengths)
@@ -175,48 +214,73 @@ def train(model, train_loader, val_loader):
 
             train_loss_sum += loss.item()
 
-        train_loss = train_loss_sum / len(train_loader)
+        train_loss = train_loss_sum / max(1, len(train_loader))
 
-        # ========= VALIDATION =========
+        # ======================
+        # VALIDATION
+        # ======================
         model.eval()
         val_loss_sum = 0.0
         correct = 0
         total = 0
+        cer_sum = 0.0
 
         with torch.no_grad():
             for imgs, labels, lengths in val_loader:
-                imgs, labels, lengths = imgs.to(DEVICE), labels.to(DEVICE), lengths.to(DEVICE)
+                imgs = imgs.to(DEVICE)
+                labels = labels.to(DEVICE)
+                lengths = lengths.to(DEVICE)
 
                 preds = model(imgs)
                 preds_perm = preds.permute(1, 0, 2)
 
                 pred_lengths = torch.full(
-                    (imgs.size(0),), preds_perm.size(0), dtype=torch.long, device=DEVICE
+                    (imgs.size(0),),
+                    preds_perm.size(0),
+                    dtype=torch.long,
+                    device=DEVICE
                 )
 
-                loss = ctc(preds_perm.log_softmax(2), labels, pred_lengths, lengths)
+                loss = ctc(
+                    preds_perm.log_softmax(2),
+                    labels,
+                    pred_lengths,
+                    lengths
+                )
+
                 val_loss_sum += loss.item()
 
                 decoded = decode(preds)
-                for dec, lbl in zip(decoded, labels.split(lengths.tolist())):
-                    label_text = "".join(IDX2CHAR[i.item()] for i in lbl)
-                    if fix_time(dec) == fix_time(label_text):
+                gt_labels = labels.split(lengths.tolist())
+
+                for dec, lbl in zip(decoded, gt_labels):
+                    gt = "".join(IDX2CHAR[i.item()] for i in lbl)
+                    dec_fix = fix_time(dec)
+                    gt_fix = fix_time(gt)
+
+                    if dec_fix == gt_fix:
                         correct += 1
+
+                    cer_sum += cer(dec_fix, gt_fix)
                     total += 1
 
-        val_loss = val_loss_sum / len(val_loader)
+        val_loss = val_loss_sum / max(1, len(val_loader))
         val_acc = correct / total if total > 0 else 0.0
+        val_cer = cer_sum / total if total > 0 else 1.0
 
         print(
-            f"Epoch {epoch+1}: "
-            f"train_loss={train_loss:.4f}, "
-            f"val_loss={val_loss:.4f}, "
-            f"val_acc={val_acc:.4f}"
+            f"Epoch {epoch+1:03d} | "
+            f"train_loss={train_loss:.4f} | "
+            f"val_loss={val_loss:.4f} | "
+            f"val_acc={val_acc:.4f} | "
+            f"val_CER={val_cer:.4f}"
         )
 
         scheduler.step(val_loss)
 
-        # ========= EARLY STOPPING =========
+        # ======================
+        # EARLY STOPPING
+        # ======================
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
