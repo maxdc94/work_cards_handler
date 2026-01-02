@@ -1,32 +1,33 @@
-import cv2
 import torch
 import numpy as np
 import pandas as pd
 from torch import nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from torchvision import models
 import albumentations as A
 from tqdm import tqdm
 from datetime import datetime
+from sklearn.model_selection import train_test_split
 import os
+import cv2
+import costants as C
 
 # =========================
 # CONFIG
 # =========================
 IMG_H = 40
 IMG_W = 160
-BATCH_SIZE = 8
-EPOCHS = 500
-LR = 5e-5
+BATCH_SIZE = 16
+EPOCHS = 2000
+LR = 2e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print("Using device:", DEVICE)
-
 VOCAB = "0123456789:"
 BLANK = 0
 CHAR2IDX = {c: i + 1 for i, c in enumerate(VOCAB)}
 IDX2CHAR = {i + 1: c for i, c in enumerate(VOCAB)}
-
 EARLY_STOPPING_PATIENCE = 20
+
+print("Using device:", DEVICE)
 
 # =========================
 # PREPROCESSING
@@ -47,36 +48,47 @@ def preprocess(img):
 # =========================
 augment = A.Compose([
     A.RandomBrightnessContrast(0.1, 0.1),
-    A.ShiftScaleRotate(shift_limit=0.02, scale_limit=0.02, rotate_limit=2, border_mode=cv2.BORDER_CONSTANT, value=255)
+    A.Affine(translate_percent=(0.02,0.02), scale=(0.98,1.02), rotate=(-2,2), mode=cv2.BORDER_CONSTANT, cval=255)
 ])
 
 # =========================
 # DATASET
 # =========================
-class TimeDataset(Dataset):
-    def __init__(self, csv_path, img_dir, training=True):
-        self.df = pd.read_csv(csv_path)
-        self.img_dir = img_dir
-        self.training = training
-
-    def __len__(self):
-        return len(self.df)
+class OCRDataset(Dataset):
+    def __init__(self, samples, augment=False):
+        self.samples = samples
+        self.augment = augment
 
     def encode(self, text):
         return torch.tensor([CHAR2IDX[c] for c in text], dtype=torch.long)
 
+    def __len__(self):
+        return len(self.samples)
+
     def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        img = cv2.imread(os.path.join(self.img_dir, row.filename))
+        img_path, label_text = self.samples[idx]
+        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         img = preprocess(img)
-
-        if self.training:
-            img = augment(image=(img * 255).astype(np.uint8))["image"]
-            img = img.astype(np.float32) / 255.0
-
-        img = torch.tensor(img).unsqueeze(0).repeat(3, 1, 1)
-        label = self.encode(row.label)
+        if self.augment:
+            img = augment(image=(img*255).astype(np.uint8))["image"]
+            img = img.astype(np.float32)/255.0
+        img = torch.tensor(img).unsqueeze(0).repeat(3,1,1)
+        label = self.encode(label_text)
         return img, label
+
+# =========================
+# COLLATE FUNCTION
+# =========================
+def collate_fn(batch):
+    imgs, labels, lengths = [], [], []
+    for img, label in batch:
+        imgs.append(img)
+        labels.append(label)
+        lengths.append(len(label))
+    imgs = torch.stack(imgs)
+    labels = torch.cat(labels)
+    lengths = torch.tensor(lengths, dtype=torch.long)
+    return imgs, labels, lengths
 
 # =========================
 # MODEL
@@ -84,26 +96,24 @@ class TimeDataset(Dataset):
 class CRNN(nn.Module):
     def __init__(self):
         super().__init__()
-        backbone = models.mobilenet_v3_small(pretrained=True)
+        backbone = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1)
         self.cnn = backbone.features
-        self.cnn[0][0].stride = (1, 1)
-
-        # FC + LSTM più piccolo
-        self.fc = nn.Linear(576, 64)
-        self.rnn = nn.LSTM(64, 64, bidirectional=True, batch_first=True)
-        self.classifier = nn.Linear(128, len(VOCAB) + 1)
+        self.cnn[0][0].stride = (1,1)
+        self.fc = nn.Linear(576,64)
+        self.rnn = nn.LSTM(64,64,bidirectional=True,batch_first=True)
+        self.classifier = nn.Linear(128,len(VOCAB)+1)
 
     def forward(self, x):
         x = self.cnn(x)
-        x = x.permute(0, 3, 1, 2)
-        x = x.mean(dim=3)
+        x = x.permute(0,3,1,2)        # [B,C,H,W] -> [B,W,H,C]
+        x = x.mean(dim=3)             # global avg pool over H
         x = self.fc(x)
         x, _ = self.rnn(x)
         x = self.classifier(x)
         return x
 
 # =========================
-# DECODING ROBUSTO
+# DECODING
 # =========================
 def decode(pred):
     pred = pred.softmax(2).argmax(2)
@@ -114,104 +124,101 @@ def decode(pred):
         for c in p:
             c = c.item()
             if c != prev and c != BLANK:
-                text += IDX2CHAR.get(c, "")
+                text += IDX2CHAR.get(c,"")
             prev = c
-        # post-processing per renderlo HH:MM
-        text = fix_time(text)
-        results.append(text)
+        results.append(fix_time(text))
     return results
 
-def fix_time(t):
-    """
-    Converte stringa generata dalla rete in HH:MM valida
-    es: "12:1" -> "12:01", "::::" -> "00:00"
-    """
-    # Se non c'è due parti separate dai ':', ritorna 00:00
-    if len(t) != 5 or t[2] != ":" or t == ":::::":
-        return "00:00"
-    h, m = t.split(":")
-    if not (h.isdigit() and m.isdigit()):
-        return "00:00"
-    h = max(0, min(int(h), 23))
-    m = max(0, min(int(m), 59))
+def fix_time(t:str)->str:
+    t = "".join(c for c in t if c in "0123456789:")
+    if t.count(":")!=1: return "00:00"
+    h,m = t.split(":")
+    if not(h.isdigit() and m.isdigit()): return "00:00"
+    h = max(0,min(int(h),23))
+    m = max(0,min(int(m),59))
     return f"{h:02d}:{m:02d}"
 
 # =========================
-# COLLATE
+# TRAIN FUNCTION
 # =========================
-def ctc_collate(batch):
-    imgs, labels, label_lengths = [], [], []
-    for img, label in batch:
-        imgs.append(img)
-        labels.append(label)
-        label_lengths.append(len(label))
-
-    imgs = torch.stack(imgs)
-    labels = torch.cat(labels)
-    label_lengths = torch.tensor(label_lengths, dtype=torch.long)
-
-    return imgs, labels, label_lengths
-
-# =========================
-# TRAIN
-# =========================
-def train(csv_path="dataset/labels.csv", img_dir="dataset/images"):
-    ds = TimeDataset(csv_path, img_dir, True)
-    val_size = max(1, int(len(ds) * 0.2))
-    train_size = len(ds) - val_size
-    train_ds, val_ds = random_split(ds, [train_size, val_size])
-
-    train_dl = DataLoader(train_ds, BATCH_SIZE, shuffle=True, drop_last=True, collate_fn=ctc_collate)
-    val_dl = DataLoader(val_ds, BATCH_SIZE, shuffle=False, drop_last=False, collate_fn=ctc_collate)
-
-    model = CRNN().to(DEVICE)
+def train(model, train_loader, val_loader):
     opt = torch.optim.Adam(model.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="min", factor=0.5, patience=5
+    )
     ctc = nn.CTCLoss(blank=BLANK, zero_infinity=True)
 
     best_val_loss = float("inf")
     patience_counter = 0
 
     for epoch in range(EPOCHS):
+        # ========= TRAIN =========
         model.train()
-        train_loss_sum = 0
-        for imgs, labels, label_lengths in tqdm(train_dl):
-            imgs, labels, label_lengths = imgs.to(DEVICE), labels.to(DEVICE), label_lengths.to(DEVICE)
+        train_loss_sum = 0.0
+
+        for imgs, labels, lengths in tqdm(train_loader):
+            imgs, labels, lengths = imgs.to(DEVICE), labels.to(DEVICE), lengths.to(DEVICE)
+
             preds = model(imgs)
-            preds = preds.permute(1,0,2)  # [T,B,C]
-            pred_lengths = torch.full((imgs.size(0),), preds.size(0), dtype=torch.long, device=DEVICE)
-            loss = ctc(preds.log_softmax(2), labels, pred_lengths, label_lengths)
+            preds = preds.permute(1, 0, 2)  # [T,B,C]
+
+            pred_lengths = torch.full(
+                (imgs.size(0),), preds.size(0), dtype=torch.long, device=DEVICE
+            )
+
+            loss = ctc(preds.log_softmax(2), labels, pred_lengths, lengths)
+
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+
             train_loss_sum += loss.item()
 
-        # VALIDATION
+        train_loss = train_loss_sum / len(train_loader)
+
+        # ========= VALIDATION =========
         model.eval()
-        val_loss_sum = 0
+        val_loss_sum = 0.0
         correct = 0
         total = 0
+
         with torch.no_grad():
-            for imgs, labels, label_lengths in val_dl:
-                imgs, labels, label_lengths = imgs.to(DEVICE), labels.to(DEVICE), label_lengths.to(DEVICE)
+            for imgs, labels, lengths in val_loader:
+                imgs, labels, lengths = imgs.to(DEVICE), labels.to(DEVICE), lengths.to(DEVICE)
+
                 preds = model(imgs)
-                preds_perm = preds.permute(1,0,2)
-                pred_lengths = torch.full((imgs.size(0),), preds_perm.size(0), dtype=torch.long, device=DEVICE)
-                loss = ctc(preds_perm.log_softmax(2), labels, pred_lengths, label_lengths)
+                preds_perm = preds.permute(1, 0, 2)
+
+                pred_lengths = torch.full(
+                    (imgs.size(0),), preds_perm.size(0), dtype=torch.long, device=DEVICE
+                )
+
+                loss = ctc(preds_perm.log_softmax(2), labels, pred_lengths, lengths)
                 val_loss_sum += loss.item()
+
                 decoded = decode(preds)
-                for dec, lbl in zip(decoded, labels.split(label_lengths.tolist())):
-                    total += 1
-                    label_text = "".join([IDX2CHAR[i.item()] for i in lbl])
+                for dec, lbl in zip(decoded, labels.split(lengths.tolist())):
+                    label_text = "".join(IDX2CHAR[i.item()] for i in lbl)
                     if fix_time(dec) == fix_time(label_text):
                         correct += 1
+                    total += 1
 
+        val_loss = val_loss_sum / len(val_loader)
         val_acc = correct / total if total > 0 else 0.0
-        print(f"Epoch {epoch+1}: train_loss={train_loss_sum:.4f}, val_loss={val_loss_sum:.4f}, val_acc={val_acc:.4f}")
 
-        # Early stopping
-        if val_loss_sum < best_val_loss:
-            best_val_loss = val_loss_sum
+        print(
+            f"Epoch {epoch+1}: "
+            f"train_loss={train_loss:.4f}, "
+            f"val_loss={val_loss:.4f}, "
+            f"val_acc={val_acc:.4f}"
+        )
+
+        scheduler.step(val_loss)
+
+        # ========= EARLY STOPPING =========
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             patience_counter = 0
             today = datetime.today().strftime("%Y%m%d")
             torch.save(model.state_dict(), f"ocr_timbratrice_{today}.pt")
@@ -226,26 +233,33 @@ def train(csv_path="dataset/labels.csv", img_dir="dataset/images"):
 # =========================
 def infer(image_path, model_path):
     model = CRNN().to(DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.load_state_dict(torch.load(model_path,map_location=DEVICE))
     model.eval()
-
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     img = preprocess(img)
     img = torch.tensor(img).unsqueeze(0).repeat(3,1,1).unsqueeze(0).to(DEVICE)
-
     with torch.no_grad():
         preds = model(img)
     return decode(preds)[0]
 
 # =========================
-if __name__ == "__main__":
-    _in = input("Do you want to train or perform inference? (T/I): ").upper()
-    if _in == "T":
-        train()
-    elif _in == "I":
-        path = input("Path image: ")
-        model_path = input("Path model .pt: ")
-        text = infer(path, model_path)
-        print("Ora stimata:", text)
+# MAIN
+# =========================
+if __name__=="__main__":
+    mode = input("Do you want to train or infer? (T/I): ").upper()
+    if mode=="T":
+        csv_path = C.TRAINING_SET_LABELS
+        img_dir  = C.TRAINING_SET
+        df = pd.read_csv(csv_path)
+        samples = [(os.path.join(img_dir,row.filename), row.label) for _,row in df.iterrows()]
+        train_samples, val_samples = train_test_split(samples,test_size=0.2,random_state=42)
+        train_loader = DataLoader(OCRDataset(train_samples, augment=True), batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+        val_loader   = DataLoader(OCRDataset(val_samples, augment=False), batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+        model = CRNN().to(DEVICE)
+        train(model, train_loader, val_loader)
+    elif mode=="I":
+        img_path = input("Path immagine: ")
+        model_path = input("Path modello .pt: ")
+        print("Predicted time:", infer(img_path, model_path))
     else:
         print("Input non valido")

@@ -55,10 +55,10 @@ def read_work_card(img_path):
     # Coordinate colonne (in pixel)
     COLS = [
         (0, 105),    # colonna 1 (giorno?)
-        (156, 249),  # entrata mattino
+        (150, 249),  # entrata mattino
         (285, 394),  # uscita mattino
         (430, 538),  # entrata pomeriggio
-        (582, 682)   # uscita pomeriggio
+        (574, 682)   # uscita pomeriggio
     ]
 
     FIRST_ROW_Y = 679
@@ -83,10 +83,27 @@ def read_work_card(img_path):
         for col_index, (x1, x2) in enumerate(COLS):
             cell = gray[y1:y2, x1:x2]
 
-            # Salva cella raw
+
             cell_img = f"{file_name}_r{i:02d}_c{col_index}.png"
             cell_path = os.path.join(path, cell_img)
-            cv2.imwrite(cell_path, cell)
+
+            if not os.path.exists(cell_path):
+                cv2.imwrite(cell_path, cell)
+            #else:
+            #    logger.info(f"File already exists: {cell_path}")
+
+
+            # add image to training set if its column is > 0 , and it is not empty and it is not already present in the dataset
+            if col_index > 0:
+
+                if not is_image_blank(cell_path):
+
+                    training_path = os.path.join(C.TRAINING_SET, cell_img)
+                    if not os.path.exists(training_path):
+                        cv2.imwrite(training_path, cell)
+                    else:
+                        logger.info(f"File already exists: {training_path}")
+
 
             #if col_index == 0:
             #    row_values.append(i+1)
@@ -170,8 +187,9 @@ def cards_to_CSV(img_path, model_path):
 def pdf_to_images(pdf_path):
 
 
+
     file_name = Path(pdf_path).stem
-    output_dir = "tmp/work_cards"
+    output_dir = f"{C.BASE_DIR}/tmp/work_cards"
 
     # Coordinate di taglio (in punti PDF)
     # (x0, y0, x1, y1)
