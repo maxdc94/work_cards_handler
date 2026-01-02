@@ -1,7 +1,7 @@
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL = f"{BASE_DIR}/ocr_timbratrice_20260101_v0.pt"
+MODEL = f"{BASE_DIR}/ocr_timbratrice_20260102_078.pt"
 INPUT_PDF = f"{BASE_DIR}/input/cartellini_202511.pdf"
 WORK_CARDS_FOLDER = f"{BASE_DIR}/tmp/work_cards"
 CELL_IMGS_FOLDER = f"{BASE_DIR}/tmp/cells_images"

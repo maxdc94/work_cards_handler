@@ -11,6 +11,10 @@ from sklearn.model_selection import train_test_split
 import os
 import cv2
 import costants as C
+import torch
+import torch.nn.functional as F
+
+
 
 # =========================
 # CONFIG
@@ -47,8 +51,11 @@ def preprocess(img):
 # AUGMENTATION
 # =========================
 augment = A.Compose([
-    A.RandomBrightnessContrast(0.1, 0.1),
-    A.Affine(translate_percent=(0.02,0.02), scale=(0.98,1.02), rotate=(-2,2), mode=cv2.BORDER_CONSTANT, cval=255)
+    A.Rotate(limit=5, border_mode=0),
+    A.ShiftScaleRotate(shift_limit=0.02, scale_limit=0.05, rotate_limit=0, border_mode=0),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2),
+    A.GaussNoise(var_limit=(10.0, 50.0), p=0.2),
+    A.MotionBlur(blur_limit=3, p=0.1)
 ])
 
 # =========================
@@ -99,9 +106,9 @@ class CRNN(nn.Module):
         backbone = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1)
         self.cnn = backbone.features
         self.cnn[0][0].stride = (1,1)
-        self.fc = nn.Linear(576,64)
-        self.rnn = nn.LSTM(64,64,bidirectional=True,batch_first=True)
-        self.classifier = nn.Linear(128,len(VOCAB)+1)
+        self.fc = nn.Linear(576, 256)
+        self.rnn = nn.LSTM(256, 128, num_layers=2, bidirectional=True, batch_first=True, dropout=0.2)
+        self.classifier = nn.Linear(128*2, len(VOCAB)+1)  # 128*2 = 256
 
     def forward(self, x):
         x = self.cnn(x)
@@ -115,19 +122,24 @@ class CRNN(nn.Module):
 # =========================
 # DECODING
 # =========================
-def decode(pred):
-    pred = pred.softmax(2).argmax(2)
-    results = []
-    for p in pred:
-        text = ""
-        prev = None
-        for c in p:
-            c = c.item()
-            if c != prev and c != BLANK:
-                text += IDX2CHAR.get(c,"")
+def decode(pred, beam_width=3):
+    """
+    pred: output [B, T, C] del modello (prima di softmax)
+    beam_width: numero di “percorsi” da considerare, anche se qui è semplice
+    """
+    pred = F.log_softmax(pred, dim=2)  # assicurati che sia log_softmax
+    batch_decoded = []
+    for b in range(pred.size(0)):
+        probs = pred[b].exp().cpu().numpy()  # da log_probs a probs
+        seq = []
+        prev = -1
+        for t in range(probs.shape[0]):
+            c = probs[t].argmax()
+            if c != prev and c != 0:  # 0 = blank
+                seq.append(IDX2CHAR.get(c, ""))
             prev = c
-        results.append(fix_time(text))
-    return results
+        batch_decoded.append(fix_time("".join(seq)))
+    return batch_decoded
 
 def fix_time(t:str)->str:
     t = "".join(c for c in t if c in "0123456789:")
