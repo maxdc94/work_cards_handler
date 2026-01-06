@@ -25,20 +25,20 @@ for img_name in images:
     img = cv2.imread(img_path)
 
     if img is None:
-        print(f"Errore caricando {img_name}")
+        print(f"Error loading {img_name}")
         continue
 
-    cv2.imshow("Labeling orari (ESC per uscire)", img)
+    cv2.imshow("Labeling times (ESC to exit)", img)
     cv2.waitKey(1)
 
     while True:
-        value = input(f"{img_name} → inserisci orario (hh:mm) oppure 's' per passare alla prossima foto o 'q' per uscire: ").strip()
+        value = input(f"{img_name} → Enter time (hh:mm) or 's' to skip to next photo or 'q' to exit or 'd' to delte image: ").strip()
 
         value = value.replace(".", ":")
 
         if value.lower() == "s":
             cv2.destroyAllWindows()
-            print("Passa alla prossima immagine...")
+            print("Move to the next image...")
             break
 
         if value.lower() == "d":
@@ -49,25 +49,25 @@ for img_name in images:
 
         if value.lower() == "q":
             cv2.destroyAllWindows()
-            print("Uscita salvando il lavoro...")
+            print("Exit saving work...")
             break
 
         if TIME_REGEX.match(value):
             labels[img_name] = value
             break
         else:
-            print("❌ Formato non valido. Usa hh:mm (es. 07:56)")
+            print("Invalid format. Use hh:mm")
 
     if value.lower() == "q":
         break
 
 cv2.destroyAllWindows()
 
-# Scrittura CSV con header
+# CSV writing
 with open(C.TRAINING_SET_LABELS, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow(["filename", "label"])
     for filename, label in labels.items():
         writer.writerow([filename, label])
 
-print("✅ Labeling completato")
+print("Labeling completed")

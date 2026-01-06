@@ -18,7 +18,9 @@ def order_points(pts):
 
 
 def detect_biggest_contour(img):
-    """Trova il contorno più grande utile per ritagliare il contenuto."""
+    """
+    Find the largest outline useful for cutting the content
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     blur = cv2.GaussianBlur(gray, (5,5), 0)
@@ -50,11 +52,11 @@ def extract_images_from_pdf(pdf_path, output_dir):
         img = Image.open(io.BytesIO(pix.tobytes("png")))
         img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-        # Trova contorno principale
+        # Find main contour
         cnt = detect_biggest_contour(img_cv)
 
         if cnt is None:
-            print(f"⚠ Nessun contorno trovato nella pagina {i}, salto.")
+            print(f"No outline found on page {i}, skip.")
             continue
 
         rect = cv2.minAreaRect(cnt)
@@ -75,10 +77,10 @@ def extract_images_from_pdf(pdf_path, output_dir):
         out_path = os.path.join(output_dir, f"{pdf_name}_{i}.png")
         cv2.imwrite(out_path, cropped)
 
-        print(f"✔ Salvata: {out_path}")
+        print(f"Saved: {out_path}")
 
     doc.close()
-    print("✔ Completato!")
+    print("Completed!")
 
 
 if __name__ == "__main__":

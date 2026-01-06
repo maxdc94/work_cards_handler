@@ -42,7 +42,7 @@ def preprocess(img):
     elif len(img.shape) == 3:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
-        raise ValueError(f"Formato immagine non valido: {img.shape}")
+        raise ValueError(f"Invalid image format: {img.shape}")
     gray = cv2.resize(gray, (IMG_W, IMG_H))
     gray = gray.astype("float32") / 255.0
     return gray
@@ -124,13 +124,13 @@ class CRNN(nn.Module):
 # =========================
 def decode(pred, beam_width=3):
     """
-    pred: output [B, T, C] del modello (prima di softmax)
-    beam_width: numero di “percorsi” da considerare, anche se qui è semplice
+    pred: model output [B, T, C] (before softmax)
+    beam_width: number of “paths” to consider, although here it is simple
     """
-    pred = F.log_softmax(pred, dim=2)  # assicurati che sia log_softmax
+    pred = F.log_softmax(pred, dim=2)  # make sure it's log_softmax
     batch_decoded = []
     for b in range(pred.size(0)):
-        probs = pred[b].exp().cpu().numpy()  # da log_probs a probs
+        probs = pred[b].exp().cpu().numpy()  # from log probs to probs
         seq = []
         prev = -1
         for t in range(probs.shape[0]):
@@ -334,8 +334,8 @@ if __name__=="__main__":
         model = CRNN().to(DEVICE)
         train(model, train_loader, val_loader)
     elif mode=="I":
-        img_path = input("Path immagine: ")
-        model_path = input("Path modello .pt: ")
+        img_path = input("Image path: ")
+        model_path = input("Model path (.pt file): ")
         print("Predicted time:", infer(img_path, model_path))
     else:
-        print("Input non valido")
+        print("Not valid input")

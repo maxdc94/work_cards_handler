@@ -77,7 +77,7 @@ It includes Early Stopping to save the best performing model automatically.
 **Inference:** Use the Infer (I) mode in ocr.py to test the model on a single image.
 
 ## 📄 License
-This project is licensed under the GPL License.
+This project is licensed under the GPL v2.0 License.
 
 ## ✉️ Contacts
 Massimo: https://github.com/maxdc94

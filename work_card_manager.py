@@ -12,34 +12,44 @@ import costants as C
 
 logger = logging.getLogger(__name__)
 
+# Column coordinates (in pixels)
+COLS = [
+    (0, 105),    # first columns (day number)
+    (150, 249),  # morning entrance
+    (285, 394),  # morning exit
+    (430, 538),  # afternoon entry
+    (574, 682)   # afternoon exit
+]
+
+FIRST_ROW_Y = 679
+ROW_HEIGHT = 54
+NUM_ROWS = 31
+
 def is_image_blank(image_path):
     std, darkest_mean = analyze_image(image_path)
     return  darkest_mean > 200
 
 def analyze_image(image_path, border=15, top_n=10):
     """
-    Ritaglia i bordi e calcola std + media dei top_n pixel più scuri.
+    Crops the edges and calculates std + average of the top_n darkest pixels.
 
-    :param image_path: percorso immagine
-    :param border: numero di pixel da tagliare ai bordi
-    :param top_n: numero di pixel più scuri da considerare
-    :return: std, media dei top_n pixel più scuri
+    :param image_path: image path
+    :param border: number of pixels to crop at the edges
+    :param top_n: number of darkest pixels to consider
+    :return: std, average of the top_n darkest pixels
     """
-    # Leggi immagine in scala di grigi
+    # Read grayscale image
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise ValueError(f"Immagine non trovata: {image_path}")
+        raise ValueError(f"Image not found: {image_path}")
     
-    # Ritaglia i bordi
+    # Crop the edges
     img_cropped = img[border:-border, border:-border]
-    
-    # Salva l'immagine ritagliata
-    
-    
-    # Calcola deviazione standard
+  
+    # Calculate standard deviation
     std = np.std(img_cropped)
 
-    # Media dei top_n pixel più scuri
+    # Average of the top_n darkest pixels
     pixels_sorted = np.sort(img_cropped.flatten())
     darkest_mean = np.mean(pixels_sorted[:top_n])
 
@@ -51,20 +61,7 @@ def analyze_image(image_path, border=15, top_n=10):
 def read_work_card(img_path):
 
     file_name = img_path.stem
-
-    # Coordinate colonne (in pixel)
-    COLS = [
-        (0, 105),    # colonna 1 (giorno?)
-        (150, 249),  # entrata mattino
-        (285, 394),  # uscita mattino
-        (430, 538),  # entrata pomeriggio
-        (574, 682)   # uscita pomeriggio
-    ]
-
-    FIRST_ROW_Y = 679
-    ROW_HEIGHT = 54
-    NUM_ROWS = 31  # numero massimo righe (giorni mese)
-
+    
     os.makedirs(C.CELL_IMGS_FOLDER, exist_ok=True)
 
     path = os.path.join(C.CELL_IMGS_FOLDER, file_name)
@@ -79,7 +76,7 @@ def read_work_card(img_path):
         y1 = FIRST_ROW_Y + i * ROW_HEIGHT
         y2 = y1 + ROW_HEIGHT
 
-        #row_values = []
+
         for col_index, (x1, x2) in enumerate(COLS):
             cell = gray[y1:y2, x1:x2]
 
@@ -105,22 +102,6 @@ def read_work_card(img_path):
                         logger.info(f"File already exists: {training_path}")
 
 
-            #if col_index == 0:
-            #    row_values.append(i+1)
-            #else:
-            #    text = ""
-            #    if not is_image_blank(cell_path):
-            #        # OCR
-            #        text = ocr.infer(cell_path)
-            #        logger.debug("OCR {img_path} ==> [{i}, {col_index}] = {text}")
-            #    row_values.append(text)
-        #rows.append(row_values)
-
-    # save csv in tmp folder
-    #with open(f"{path}/{file_name}.csv", "w", newline="") as f:
-    #    writer = csv.writer(f)
-    #    writer.writerows(rows)
-
     # save image in tmp folder
     shutil.copy(img_path, f"{path}/{file_name}.png")
 
@@ -128,19 +109,6 @@ def read_work_card(img_path):
 def cards_to_CSV(img_path, model_path):
 
     file_name = img_path.stem
-
-    # Coordinate colonne (in pixel)
-    COLS = [
-        (0, 105),    # colonna 1 (giorno?)
-        (156, 249),  # entrata mattino
-        (285, 394),  # uscita mattino
-        (430, 538),  # entrata pomeriggio
-        (582, 682)   # uscita pomeriggio
-    ]
-
-    FIRST_ROW_Y = 679
-    ROW_HEIGHT = 54
-    NUM_ROWS = 31  # numero massimo righe (giorni mese)
 
     os.makedirs(C.CELL_IMGS_FOLDER, exist_ok=True)
 
@@ -160,7 +128,7 @@ def cards_to_CSV(img_path, model_path):
         for col_index, (x1, x2) in enumerate(COLS):
             cell = gray[y1:y2, x1:x2]
 
-            # Salva cella raw
+            # cell image saving
             cell_img = f"{file_name}_r{i:02d}_c{col_index}.png"
             cell_path = os.path.join(path, cell_img)
             cv2.imwrite(cell_path, cell)
@@ -191,9 +159,6 @@ def pdf_to_images(pdf_path):
     file_name = Path(pdf_path).stem
     output_dir = f"{C.BASE_DIR}/tmp/work_cards"
 
-    # Coordinate di taglio (in punti PDF)
-    # (x0, y0, x1, y1)
-    # esempio: porzione centrale
     crop_rect = fitz.Rect(0, 0, 827, 300)
 
     doc = fitz.open(pdf_path)
