@@ -4,6 +4,9 @@ import numpy as np
 import io
 import os
 from PIL import Image
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def order_points(pts):
@@ -45,7 +48,7 @@ def extract_images_from_pdf(pdf_path, output_dir):
     doc = fitz.open(pdf_path)
 
     for i, page in enumerate(doc, start=1):
-        print(f"Processing page {i}...")
+        logger.info(f"Processing page {i}...")
 
         # Render pagina come immagine
         pix = page.get_pixmap(dpi=300)
@@ -56,7 +59,7 @@ def extract_images_from_pdf(pdf_path, output_dir):
         cnt = detect_biggest_contour(img_cv)
 
         if cnt is None:
-            print(f"No outline found on page {i}, skip.")
+            logger.warning(f"No outline found on page {i}, skip.")
             continue
 
         rect = cv2.minAreaRect(cnt)
@@ -77,10 +80,10 @@ def extract_images_from_pdf(pdf_path, output_dir):
         out_path = os.path.join(output_dir, f"{pdf_name}_{i}.png")
         cv2.imwrite(out_path, cropped)
 
-        print(f"Saved: {out_path}")
+        logger.info(f"Saved: {out_path}")
 
     doc.close()
-    print("Completed!")
+    logger.info("Completed!")
 
 
 if __name__ == "__main__":

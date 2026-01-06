@@ -13,7 +13,9 @@ import cv2
 import costants as C
 import torch
 import torch.nn.functional as F
+import logging
 
+logger = logging.getLogger(__name__)
 
 
 # =========================
@@ -31,7 +33,7 @@ CHAR2IDX = {c: i + 1 for i, c in enumerate(VOCAB)}
 IDX2CHAR = {i + 1: c for i, c in enumerate(VOCAB)}
 EARLY_STOPPING_PATIENCE = 20
 
-print("Using device:", DEVICE)
+logger.info("Using device:", DEVICE)
 
 # =========================
 # PREPROCESSING
@@ -280,7 +282,7 @@ def train(model, train_loader, val_loader):
         val_acc = correct / total if total > 0 else 0.0
         val_cer = cer_sum / total if total > 0 else 1.0
 
-        print(
+        logger.info(
             f"Epoch {epoch+1:03d} | "
             f"train_loss={train_loss:.4f} | "
             f"val_loss={val_loss:.4f} | "
@@ -301,7 +303,7 @@ def train(model, train_loader, val_loader):
         else:
             patience_counter += 1
             if patience_counter >= EARLY_STOPPING_PATIENCE:
-                print("Early stopping!")
+                logger.info("Early stopping!")
                 break
 
 # =========================
@@ -336,6 +338,6 @@ if __name__=="__main__":
     elif mode=="I":
         img_path = input("Image path: ")
         model_path = input("Model path (.pt file): ")
-        print("Predicted time:", infer(img_path, model_path))
+        logger.info("Predicted time:", infer(img_path, model_path))
     else:
-        print("Not valid input")
+        logger.warning("Not valid input")
